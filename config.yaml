@@ -1,0 +1,16 @@
+size: small                  # 240 px — ideal for 224 px training crops
+max_workers: 16
+timeout_seconds: 30
+licenses_allowed: [CC0, CC-BY, CC-BY-SA, CC-BY-NC, CC-BY-NC-SA, CC-BY-ND, CC-BY-NC-ND]
+min_photos_per_species: 20
+max_photos_per_species: 500
+random_seed: 42
+bbox: [34, -25, 72, 45]      # [lat_min, lon_min, lat_max, lon_max]
+use_precise_europe_polygon: true
+exclude_russian_far_east: true   # clip lon <= 60 after polygon refine
+output_root: data/images
+metadata_dir: inat_metadata
+filtered_dir: filtered
+disk_budget_gb: 80
+delete_metadata_after_filter: true
+train_val_test_ratios: [0.8, 0.1, 0.1]

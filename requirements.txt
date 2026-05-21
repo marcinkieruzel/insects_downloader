@@ -1,0 +1,9 @@
+pandas>=2.0
+pyarrow>=14
+requests>=2.31
+tqdm>=4.66
+pyyaml>=6.0
+geopandas>=1.0
+shapely>=2.0
+Pillow>=10
+scikit-learn>=1.3

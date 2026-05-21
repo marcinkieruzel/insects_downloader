@@ -1,0 +1,13 @@
+.venv/
+inat_metadata/
+data/images/
+data/quarantine/
+filtered/
+splits/
+logs/
+*.parquet
+*.csv
+!requirements.txt
+__pycache__/
+*.pyc
+.DS_Store

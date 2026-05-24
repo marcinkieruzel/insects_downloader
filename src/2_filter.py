@@ -133,14 +133,18 @@ def refine_with_europe_polygon(obs: pd.DataFrame, metadata_dir: Path, exclude_fa
     return pd.DataFrame(inside)
 
 
-def load_photos(metadata_dir: Path, observation_uuids: set[str]) -> pd.DataFrame:
+def load_photos(metadata_dir: Path, observation_uuids: set[str], spill_dir: Path) -> pd.DataFrame:
     photos_path = metadata_dir / "photos.csv.gz"
-    print(f"[load] {photos_path} (streaming, filtering to matching observation_uuids)")
+    # Spill matched chunks to disk so memory stays flat across the multi-hour stream.
+    # Previously the function accumulated chunks in a Python list and was OOM-killed.
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    for stale in spill_dir.glob("chunk_*.parquet"):
+        stale.unlink()
+    print(f"[load] {photos_path} (streaming, filtering to matching observation_uuids; spill -> {spill_dir})")
     keep_cols = [
         "photo_uuid", "photo_id", "observation_uuid", "observer_id",
         "extension", "license", "width", "height", "position",
     ]
-    chunks: list[pd.DataFrame] = []
     reader = pd.read_csv(
         photos_path, sep="\t", chunksize=1_000_000, usecols=keep_cols,
         dtype={
@@ -150,13 +154,19 @@ def load_photos(metadata_dir: Path, observation_uuids: set[str]) -> pd.DataFrame
         },
         low_memory=False,
     )
-    for chunk in tqdm(reader, desc="photos", unit=" chunk"):
+    written = 0
+    for i, chunk in enumerate(tqdm(reader, desc="photos", unit=" chunk")):
         chunk = chunk[chunk["observation_uuid"].isin(observation_uuids)]
         if not chunk.empty:
-            chunks.append(chunk)
-    if not chunks:
+            chunk.to_parquet(spill_dir / f"chunk_{i:06d}.parquet", index=False)
+            written += 1
+    if written == 0:
+        shutil.rmtree(spill_dir, ignore_errors=True)
         return pd.DataFrame(columns=keep_cols)
-    return pd.concat(chunks, ignore_index=True)
+    print(f"[info] spilled {written} matched photo chunks; concatenating from disk")
+    result = pd.read_parquet(spill_dir)
+    shutil.rmtree(spill_dir, ignore_errors=True)
+    return result
 
 
 def balance(df: pd.DataFrame, min_n: int, max_n: int, seed: int) -> pd.DataFrame:
@@ -192,7 +202,11 @@ def main() -> None:
     obs.to_parquet(obs_out, index=False)
     print(f"[save] {obs_out} ({len(obs):,} rows)")
 
-    photos = load_photos(paths["metadata"], set(obs["observation_uuid"]))
+    photos = load_photos(
+        paths["metadata"],
+        set(obs["observation_uuid"]),
+        paths["filtered"] / "_photos_chunks_tmp",
+    )
     print(f"[info] photos joined to filtered observations: {len(photos):,}")
 
     merged = photos.merge(

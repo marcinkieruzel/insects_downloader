@@ -1,0 +1,42 @@
+[Unit]
+Description=Insects classifier (Flask + OpenVINO via gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=insects
+Group=insects
+WorkingDirectory=/opt/insects
+
+Environment=HOST=0.0.0.0
+Environment=PORT=8000
+Environment=DEVICE=CPU
+Environment=MAX_UPLOAD_MB=20
+Environment=LOG_LEVEL=INFO
+
+# --preload loads the model once in the master before forking workers, so
+# startup errors are reported cleanly and (with -w 1) the model lives in
+# exactly one process. --timeout 120 covers the one-time PT->IR conversion
+# on the very first boot; subsequent boots load the cached IR in seconds.
+ExecStart=/opt/insects/.venv/bin/gunicorn \
+    --workers 1 \
+    --threads 4 \
+    --preload \
+    --timeout 120 \
+    --bind ${HOST}:${PORT} \
+    --access-logfile - \
+    --error-logfile - \
+    www.app:app
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/insects/checkpoints /opt/insects/logs
+
+[Install]
+WantedBy=multi-user.target

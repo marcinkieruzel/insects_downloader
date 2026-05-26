@@ -11,3 +11,4 @@ flask>=3.0
 openvino>=2024.0
 torch>=2.2
 torchvision>=0.17
+gunicorn>=21.2

@@ -1,29 +1,37 @@
 """Flask API for the insect classifier, served with OpenVINO inference.
 
-One endpoint:
+Endpoints:
 
+    GET  /          HTML upload form
+    GET  /healthz   liveness + model info (for load balancers / systemd)
     POST /predict   multipart/form-data with field 'image'  ->  JSON top-5
 
 On first startup the PyTorch checkpoint (checkpoints/best.pt) is converted to
 OpenVINO IR (checkpoints/best.xml + best.bin) and cached. Subsequent boots
-load the IR directly. Inference runs on the OpenVINO CPU plugin by default —
-typically 3-5x faster than PyTorch CPU and competitive with Intel iGPU. Switch
-DEVICE to "GPU" if you have an Intel iGPU/dGPU.
+load the IR directly. Inference runs on the OpenVINO CPU plugin by default;
+set DEVICE=GPU env var for Intel iGPU/dGPU.
 
-Install + run:
+Configuration is read from environment variables (defaults in parentheses):
 
-    .venv/bin/python -m pip install flask openvino
+    HOST           bind address for dev server     (127.0.0.1)
+    PORT           bind port for dev server        (5000)
+    DEVICE         OpenVINO device                 (CPU)
+    MAX_UPLOAD_MB  max upload size in megabytes    (20)
+    LOG_LEVEL      stdlib logging level            (INFO)
+
+Dev:
     .venv/bin/python www/app.py
 
-Test:
-
-    curl -F "image=@/path/to/insect.jpg" http://127.0.0.1:5000/predict
+Prod (gunicorn, single worker + threads — see deploy/insects-classifier.service):
+    gunicorn --workers 1 --threads 4 --preload --bind 0.0.0.0:8000 www.app:app
 """
 
 from __future__ import annotations
 
 import io
 import json
+import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -38,12 +46,21 @@ from torchvision.models import EfficientNet_B4_Weights, efficientnet_b4
 ROOT = Path(__file__).resolve().parent.parent
 CKPT_DIR = ROOT / "checkpoints"
 IR_XML = CKPT_DIR / "best.xml"
-DEVICE = "CPU"  # "GPU" if you have an Intel iGPU/dGPU; NVIDIA users keep "CPU"
+
+DEVICE = os.environ.get("DEVICE", "CPU")
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "20"))
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("insects.app")
 
 
 def export_to_openvino(num_classes: int) -> None:
     """Convert checkpoints/best.pt -> best.xml + best.bin (one-time, cached on disk)."""
-    print(f"[export] converting best.pt -> {IR_XML.name} (num_classes={num_classes})")
+    log.info("converting best.pt -> %s (num_classes=%d)", IR_XML.name, num_classes)
     model = efficientnet_b4(weights=None)
     model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
     model.load_state_dict(
@@ -56,7 +73,7 @@ def export_to_openvino(num_classes: int) -> None:
     ov_model = ov.convert_model(model, example_input=example)
     ov_model.reshape([-1, 3, 380, 380])
     ov.save_model(ov_model, IR_XML)
-    print(f"[export] saved {IR_XML} + {IR_XML.with_suffix('.bin')}")
+    log.info("saved %s + %s", IR_XML, IR_XML.with_suffix(".bin"))
 
 
 def load_inference():
@@ -71,16 +88,27 @@ def load_inference():
         export_to_openvino(len(label_to_idx))
 
     core = ov.Core()
-    print(f"[startup] OpenVINO available devices: {core.available_devices}")
+    log.info("OpenVINO available devices: %s", core.available_devices)
     compiled = core.compile_model(core.read_model(IR_XML), DEVICE)
     transform = EfficientNet_B4_Weights.DEFAULT.transforms()
     return compiled, transform, idx_to_taxon, taxon_to_name, len(label_to_idx)
 
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 COMPILED, TRANSFORM, IDX_TO_TAXON, TAXON_TO_NAME, NUM_CLASSES = load_inference()
 OUTPUT_KEY = COMPILED.output(0)
-print(f"[startup] OpenVINO model ready on {DEVICE} with {NUM_CLASSES} classes")
+log.info("OpenVINO model ready on %s with %d classes", DEVICE, NUM_CLASSES)
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    return jsonify({"error": f"image too large (limit {MAX_UPLOAD_MB} MB)"}), 413
+
+
+@app.get("/healthz")
+def healthz():
+    return jsonify({"status": "ok", "num_classes": NUM_CLASSES, "device": DEVICE})
 
 
 def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
@@ -221,4 +249,6 @@ def predict():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host=host, port=port, debug=False)

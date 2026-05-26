@@ -81,6 +81,60 @@ Model wykorzystuje też lekki test-time augmentation (uśrednienie predykcji dla
 oryginalnego i odbitego horyzontalnie obrazu), więc każde żądanie wykonuje dwa
 przejścia przez sieć.
 
+### Konfiguracja przez zmienne środowiskowe
+
+| Zmienna         | Domyślnie   | Opis |
+|-----------------|-------------|------|
+| `HOST`          | `127.0.0.1` | Adres bind dev servera (Flask). |
+| `PORT`          | `5000`      | Port dev servera. |
+| `DEVICE`        | `CPU`       | Urządzenie OpenVINO (`CPU` lub `GPU`). |
+| `MAX_UPLOAD_MB` | `20`        | Maks. rozmiar uploadu; po przekroczeniu zwracany jest `413` z JSON-em. |
+| `LOG_LEVEL`     | `INFO`      | Poziom loggera (`DEBUG` / `INFO` / `WARNING` / ...). |
+
+Dodatkowo dostępny jest endpoint **`GET /healthz`** zwracający
+`{"status":"ok","num_classes":N,"device":"CPU"}` — używany przez load balancery
+oraz systemd do health checków.
+
+### Deploy produkcyjny (gunicorn + systemd)
+
+Plik konfiguracyjny: [deploy/insects-classifier.service](deploy/insects-classifier.service).
+Zakłada on instalację w `/opt/insects` (z venv w `/opt/insects/.venv`)
+i użytkownika systemowego `insects`.
+
+```bash
+# 1. Skopiuj repo do /opt/insects, utwórz venv i zainstaluj zależności.
+sudo mkdir -p /opt/insects && sudo chown $USER /opt/insects
+rsync -a --exclude=.venv --exclude=inat_metadata --exclude=data ./ /opt/insects/
+cd /opt/insects
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 2. Utwórz użytkownika i ustaw właściciela.
+sudo useradd --system --home /opt/insects --shell /usr/sbin/nologin insects
+sudo chown -R insects:insects /opt/insects
+
+# 3. Zainstaluj i uruchom usługę.
+sudo cp deploy/insects-classifier.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now insects-classifier
+sudo systemctl status insects-classifier
+```
+
+Domyślnie usługa nasłuchuje na `0.0.0.0:8000` (zmień `Environment=PORT=8000`
+i `HOST=` w pliku unit). Gunicorn działa z `--workers 1 --threads 4 --preload`,
+czyli **jedna kopia modelu w RAM** (ok. 300 MB) i obsługa wielu równoczesnych
+żądań przez wątki — optymalne dla CPU inference (OpenVINO uwalnia GIL).
+`--timeout 120` pokrywa jednorazową konwersję PT→IR przy pierwszym starcie.
+
+Logi gunicorna idą na stdout/stderr — przeglądasz je przez:
+
+```bash
+journalctl -u insects-classifier -f
+```
+
+Przed wystawieniem na świat warto postawić przed gunicornem reverse-proxy
+(nginx/Caddy) zapewniający TLS i ewentualny rate limiting.
+
 ## Konfiguracja pipeline'u
 
 Wszystkie parametry znajdują się w pliku [config.yaml](config.yaml).

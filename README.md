@@ -1,13 +1,17 @@
-# European Insect Image Dataset
+# Zbiór zdjęć europejskich owadów
 
-A reproducible pipeline that downloads research-grade photos of European insects from
-the public [iNaturalist Open Dataset](https://github.com/inaturalist/inaturalist-open-data)
-on AWS S3 and produces a class-balanced, ML-ready folder structure.
+Powtarzalny pipeline, który pobiera zdjęcia europejskich owadów z publicznego
+[iNaturalist Open Dataset](https://github.com/inaturalist/inaturalist-open-data)
+na AWS S3 i buduje z nich zbalansowaną klasowo strukturę katalogów gotową do
+trenowania modelu. Repozytorium zawiera również wytrenowany klasyfikator
+(EfficientNet-B4) oraz prostą aplikację Flask udostępniającą model przez API
+i przeglądarkowy formularz.
 
-Target: ~80 GB of 240 px images covering thousands of insect species across Europe,
-suitable for training a 224 px image classifier.
+Cel: ~80 GB zdjęć w rozdzielczości 240 px obejmujących tysiące europejskich
+gatunków owadów — wystarczające do wytrenowania klasyfikatora obrazu pracującego
+na wejściu 224 px.
 
-## Setup
+## Instalacja
 
 ```bash
 python3 -m venv .venv
@@ -15,72 +19,131 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run order
+`requirements.txt` zawiera wszystkie zależności potrzebne zarówno do pipeline'u
+danych, jak i do uruchomienia aplikacji Flask (Flask, OpenVINO, PyTorch,
+torchvision).
+
+## Kolejność uruchamiania pipeline'u (model jest już wytrenowany, nie trzeba powtarzać treningu aby po prostu zobaczyć efekt, przejdź do kolejnego kroku)
 
 ```bash
-python src/1_download_metadata.py   # ~12 GB of .csv.gz + Natural Earth shapefile
-python src/2_filter.py              # produces filtered/photos_to_download.parquet, deletes raw metadata
-python src/3_download_photos.py     # downloads up to ~80 GB of images, multithreaded, resumable
-python src/4_build_manifest.py      # verifies images, writes manifest.csv + attribution.csv + class_counts.csv
-python src/5_train_test_split.py    # stratified 80/10/10 split CSVs in splits/
+python src/1_download_metadata.py   # ~12 GB plików .csv.gz + shapefile Natural Earth
+python src/2_filter.py              # tworzy filtered/photos_to_download.parquet, usuwa surowe metadane
+python src/3_download_photos.py     # pobiera do ~80 GB zdjęć, wielowątkowo, z wznawianiem
+python src/4_build_manifest.py      # weryfikuje zdjęcia, zapisuje manifest.csv + attribution.csv + class_counts.csv
+python src/5_train_test_split.py    # stratyfikowany podział 80/10/10 do plików CSV w splits/
 ```
 
-## Configuration
+## Aplikacja Flask (klasyfikator)
 
-All knobs are in [config.yaml](config.yaml). Most important:
+Po wytrenowaniu modelu (lub korzystając z dostarczonych `checkpoints/best.pt`)
+można uruchomić prostą aplikację webową, która udostępnia inferencję na CPU
+przez OpenVINO.
 
-- `size: small` — 240 px. Switch to `medium` (500 px) only if you raise `disk_budget_gb`.
-- `min_photos_per_species: 20` — drop species with fewer photos.
-- `max_photos_per_species: 500` — cap large classes (random-sampled with seed).
-- `disk_budget_gb: 80` — hard stop in script 3 when image folder reaches this size.
-- `licenses_allowed` — defaults to all Creative Commons variants iNaturalist offers.
+### Uruchomienie
 
-## Disk budget
+```bash
+.venv/bin/python www/app.py
+```
 
-The pipeline fits in ~92 GB peak:
+Przy pierwszym uruchomieniu skrypt jednorazowo konwertuje `checkpoints/best.pt`
+do formatu OpenVINO IR (`checkpoints/best.xml` + `best.bin`) i cache'uje wynik
+na dysku — kolejne starty są natychmiastowe. Domyślnie inferencja działa na
+CPU; aby użyć zintegrowanej karty Intel, zmień w pliku
+[www/app.py](www/app.py) wartość `DEVICE = "CPU"` na `"GPU"`.
 
-- Step 1 writes ~12 GB of metadata to `inat_metadata/`.
-- Step 2 deletes `inat_metadata/` after filtering (when `delete_metadata_after_filter: true`).
-- Step 3 writes up to `disk_budget_gb` GB of images to `data/images/`.
-- Step 3 monitors `data/images/` size every 5,000 downloads and stops gracefully if the budget is hit.
+Po starcie aplikacja nasłuchuje pod adresem **http://127.0.0.1:5000/**.
 
-## Resume
+### Dostępne endpointy
 
-Every script is idempotent:
+- **`GET /`** — strona HTML z formularzem do wgrania zdjęcia. Po wybraniu
+  pliku pokazuje miniaturę i tabelę z top-5 predykcjami (nazwa gatunkowa +
+  prawdopodobieństwo).
+- **`POST /predict`** — czyste API JSON. Przyjmuje `multipart/form-data` z
+  polem `image`, zwraca top-5 predykcji:
 
-- Script 1 skips metadata files that already exist and pass gzip integrity.
-- Script 3 skips photos already on disk with size > 0.
-- Scripts 2, 4, 5 simply overwrite their outputs.
+  ```bash
+  curl -F "image=@/sciezka/do/owada.jpg" http://127.0.0.1:5000/predict
+  ```
 
-Ctrl+C any time and re-run — no work is repeated.
+  Przykładowa odpowiedź:
 
-## Adjusting the dataset
+  ```json
+  {
+    "predictions": [
+      {"taxon_id": 338651, "scientific_name": "Mantispa styriaca", "score": 0.9957},
+      {"taxon_id": 496767, "scientific_name": "Chorthippus apricarius", "score": 0.0001},
+      ...
+    ]
+  }
+  ```
 
-- **Grow it**: bump `max_photos_per_species` and rerun scripts 2 + 3. Only the new files are downloaded.
-- **Shrink it**: lower the cap and manually delete the excess files — the script will not auto-prune.
-- **Different geography**: edit `bbox` and `use_precise_europe_polygon`, rerun script 2 + 3.
+Model wykorzystuje też lekki test-time augmentation (uśrednienie predykcji dla
+oryginalnego i odbitego horyzontalnie obrazu), więc każde żądanie wykonuje dwa
+przejścia przez sieć.
 
-## Output layout
+## Konfiguracja pipeline'u
+
+Wszystkie parametry znajdują się w pliku [config.yaml](config.yaml).
+Najważniejsze:
+
+- `size: small` — 240 px. Przełącz na `medium` (500 px) tylko jeśli zwiększysz `disk_budget_gb`.
+- `min_photos_per_species: 20` — odrzuca gatunki z mniejszą liczbą zdjęć.
+- `max_photos_per_species: 500` — ogranicza zbyt liczne klasy (losowanie z ziarnem).
+- `disk_budget_gb: 80` — twardy limit w skrypcie 3, który zatrzymuje pobieranie po osiągnięciu rozmiaru.
+- `licenses_allowed` — domyślnie wszystkie warianty Creative Commons dostępne w iNaturalist.
+
+## Budżet dyskowy
+
+Pipeline mieści się w ok. 92 GB w szczycie:
+
+- Krok 1 zapisuje ~12 GB metadanych do `inat_metadata/`.
+- Krok 2 kasuje `inat_metadata/` po filtrowaniu (gdy `delete_metadata_after_filter: true`).
+- Krok 3 zapisuje do `disk_budget_gb` GB zdjęć w `data/images/`.
+- Krok 3 sprawdza rozmiar `data/images/` co 5 000 pobrań i kończy pracę po przekroczeniu budżetu.
+
+## Wznawianie
+
+Wszystkie skrypty są idempotentne:
+
+- Skrypt 1 pomija pliki metadanych, które już istnieją i przechodzą test integralności gzip.
+- Skrypt 3 pomija zdjęcia obecne już na dysku z rozmiarem > 0.
+- Skrypty 2, 4, 5 po prostu nadpisują swoje wyniki.
+
+Możesz przerwać dowolny krok przez Ctrl+C i uruchomić go ponownie — żadna praca nie jest powtarzana.
+
+## Modyfikacja zbioru danych
+
+- **Powiększenie**: zwiększ `max_photos_per_species` i ponownie uruchom skrypty 2 + 3. Pobierane są tylko nowe pliki.
+- **Zmniejszenie**: zmniejsz limit i ręcznie usuń nadmiarowe pliki — skrypt nie czyści automatycznie.
+- **Inny obszar geograficzny**: zmień `bbox` i `use_precise_europe_polygon`, ponownie uruchom skrypty 2 + 3.
+
+## Struktura wyjścia
 
 ```
 data/
 └── images/
-    └── <taxon_id>_<scientific_name_slug>/
+    └── <taxon_id>_<slug_nazwy_gatunkowej>/
         └── <photo_id>.<ext>
 
-manifest.csv         # one row per image with metadata
-attribution.csv      # CC attribution string per image
-class_counts.csv     # per-species image count
+manifest.csv         # jeden wiersz na zdjęcie z metadanymi
+attribution.csv      # podpis CC dla każdego zdjęcia
+class_counts.csv     # liczba zdjęć na gatunek
 splits/{train,val,test}.csv
+
+checkpoints/
+├── best.pt          # wytrenowane wagi PyTorch
+├── best.xml         # OpenVINO IR (generowane przy pierwszym starcie Flask)
+└── best.bin
 ```
 
-## Ethics
+## Etyka
 
-Most iNaturalist photos are CC-BY-NC. **Do not redistribute these images commercially.**
-Always ship `attribution.csv` alongside the dataset.
+Większość zdjęć z iNaturalist jest na licencji CC-BY-NC.
+**Nie wolno redystrybuować ich w celach komercyjnych.**
+Zawsze dołączaj `attribution.csv` razem ze zbiorem danych.
 
-## Data sources
+## Źródła danych
 
-- iNaturalist Open Dataset metadata: https://inaturalist-open-data.s3.amazonaws.com/
-- Photo URLs: `https://inaturalist-open-data.s3.amazonaws.com/photos/{photo_id}/{size}.{extension}`
-- Natural Earth countries (for Europe polygon): https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip
+- Metadane iNaturalist Open Dataset: https://inaturalist-open-data.s3.amazonaws.com/
+- Adresy zdjęć: `https://inaturalist-open-data.s3.amazonaws.com/photos/{photo_id}/{size}.{extension}`
+- Granice państw Natural Earth (do wyznaczenia poligonu Europy): https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip

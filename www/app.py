@@ -31,7 +31,7 @@ import openvino as ov
 import pandas as pd
 import torch
 import torch.nn as nn
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, render_template_string, request
 from PIL import Image
 from torchvision.models import EfficientNet_B4_Weights, efficientnet_b4
 
@@ -86,6 +86,108 @@ print(f"[startup] OpenVINO model ready on {DEVICE} with {NUM_CLASSES} classes")
 def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     e = np.exp(x - x.max(axis=axis, keepdims=True))
     return e / e.sum(axis=axis, keepdims=True)
+
+
+INDEX_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Insect classifier</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2em auto; padding: 0 1em; color: #222; }
+  h1 { margin-bottom: 0.2em; }
+  .sub { color: #666; margin-top: 0; }
+  form { margin: 1.5em 0; display: flex; gap: 0.6em; align-items: center; }
+  button { padding: 0.5em 1em; cursor: pointer; }
+  #preview { max-width: 100%; max-height: 320px; margin-top: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+  th, td { padding: 0.5em 0.6em; border-bottom: 1px solid #eee; text-align: left; }
+  .score { text-align: right; font-variant-numeric: tabular-nums; }
+  .err { color: #b00; margin-top: 1em; }
+  .muted { color: #888; }
+  .sci { font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Insect classifier</h1>
+<p class="sub">{{ num_classes }} European species &middot; OpenVINO on {{ device }}</p>
+
+<form id="f">
+  <input type="file" name="image" accept="image/*" required>
+  <button type="submit">Predict</button>
+</form>
+
+<img id="preview" hidden>
+<div id="out"></div>
+
+<script>
+const form = document.getElementById('f');
+const out = document.getElementById('out');
+const preview = document.getElementById('preview');
+
+function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+function el(tag, opts) {
+  const n = document.createElement(tag);
+  if (opts && opts.className) n.className = opts.className;
+  if (opts && opts.text != null) n.textContent = String(opts.text);
+  return n;
+}
+function message(text, cls) {
+  clear(out);
+  out.appendChild(el('p', { className: cls || 'muted', text: text }));
+}
+
+function renderPredictions(predictions) {
+  clear(out);
+  const table = el('table');
+  const thead = el('thead');
+  const hr = el('tr');
+  hr.appendChild(el('th', { text: 'Species' }));
+  hr.appendChild(el('th', { className: 'score', text: 'Score' }));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = el('tbody');
+  predictions.forEach(p => {
+    const tr = el('tr');
+    const tdName = el('td');
+    tdName.appendChild(el('span', { className: 'sci', text: p.scientific_name }));
+    tdName.appendChild(document.createTextNode(' '));
+    tdName.appendChild(el('span', { className: 'muted', text: '(taxon ' + p.taxon_id + ')' }));
+    tr.appendChild(tdName);
+    tr.appendChild(el('td', { className: 'score', text: (p.score * 100).toFixed(1) + '%' }));
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  out.appendChild(table);
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = form.image.files[0];
+  if (!file) return;
+  preview.src = URL.createObjectURL(file);
+  preview.hidden = false;
+  message('Predicting…', 'muted');
+  const data = new FormData();
+  data.append('image', file);
+  try {
+    const r = await fetch('/predict', { method: 'POST', body: data });
+    const j = await r.json();
+    if (!r.ok) { message(j.error || ('HTTP ' + r.status), 'err'); return; }
+    renderPredictions(j.predictions);
+  } catch (err) {
+    message(err.message, 'err');
+  }
+});
+</script>
+</body>
+</html>"""
+
+
+@app.get("/")
+def index():
+    return render_template_string(INDEX_HTML, num_classes=NUM_CLASSES, device=DEVICE)
 
 
 @app.post("/predict")

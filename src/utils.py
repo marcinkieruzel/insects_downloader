@@ -59,6 +59,7 @@ def project_paths(cfg: dict) -> dict[str, Path]:
         "manifest": PROJECT_ROOT / "manifest.csv",
         "attribution": PROJECT_ROOT / "attribution.csv",
         "class_counts": PROJECT_ROOT / "class_counts.csv",
+        "common_names": PROJECT_ROOT / "common_names.csv",
     }
 
 
